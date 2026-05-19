@@ -11,13 +11,14 @@ const server = http.createServer((req, res) => {
 
 const wss = new WebSocket.Server({ server });
 
-wss.on('connection', (ws, req) => {
+wss.on('connection', (ws) => {
   let pcNumber = null;
 
   ws.on('message', (raw) => {
     let msg;
     try { msg = JSON.parse(raw); } catch { return; }
 
+    // ── Registro ──────────────────────────────────────────────────
     if (msg.type === 'register') {
       pcNumber = msg.pcNumber;
       clients.set(pcNumber, ws);
@@ -25,13 +26,21 @@ wss.on('connection', (ws, req) => {
       ws.send(JSON.stringify({ type: 'registered', pcNumber, connectedPcs: [...clients.keys()].sort() }));
       broadcast({ type: 'peers_update', connectedPcs: [...clients.keys()].sort() });
     }
+
+    // ── Movimiento del mouse en tiempo real ───────────────────────
+    else if (msg.type === 'mouse_move') {
+      const target = clients.get(msg.to);
+      if (target && target.readyState === WebSocket.OPEN) {
+        target.send(JSON.stringify({ type: 'set_cursor', xPct: msg.xPct, yPct: msg.yPct }));
+      }
+    }
+
+    // ── Transferencia de control (legacy) ─────────────────────────
     else if (msg.type === 'transfer') {
       const target = clients.get(msg.to);
       if (target && target.readyState === WebSocket.OPEN) {
         target.send(JSON.stringify({ type: 'take_mouse', from: pcNumber, yPercent: msg.yPercent, side: msg.side }));
         console.log(`Mouse: PC${pcNumber} → PC${msg.to}`);
-      } else {
-        ws.send(JSON.stringify({ type: 'take_mouse', from: 0, yPercent: 0.5, side: msg.side === 'left' ? 'right' : 'left' }));
       }
     }
   });
