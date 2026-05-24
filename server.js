@@ -3,6 +3,9 @@ const WebSocket = require('ws');
 const PORT = process.env.PORT || 8080;
 const clients = new Map();
 
+// Rastrear quién controla a quién: controlledBy[pc] = controllerPc
+const controlledBy = new Map();
+
 const server = http.createServer((req, res) => {
   res.writeHead(200); res.end('NXQ KVM OK\n');
 });
@@ -29,15 +32,34 @@ wss.on('connection', (ws) => {
       forward(msg.to, { type: 'mouse_button', btn: msg.btn, wheel: msg.wheel || 0 });
     }
     else if (msg.type === 'transfer') {
+      controlledBy.set(msg.to, pcNumber);
       forward(msg.to, { type: 'take_mouse', from: pcNumber, yPercent: msg.yPercent, side: msg.side });
     }
     else if (msg.type === 'release_mouse') {
+      controlledBy.delete(msg.to);
       forward(msg.to, { type: 'release_mouse', from: pcNumber });
+    }
+    else if (msg.type === 'steal_mouse') {
+      // PC2 tomó el control — avisar a quien la controlaba
+      const controller = controlledBy.get(pcNumber);
+      if (controller) {
+        controlledBy.delete(pcNumber);
+        forward(controller, { type: 'steal_mouse', from: pcNumber });
+        console.log(`PC${pcNumber} robó el mouse de PC${controller}`);
+      }
     }
   });
 
   ws.on('close', () => {
     if (pcNumber) {
+      // Liberar cualquier PC que estuviera siendo controlada por esta
+      for (const [controlled, controller] of controlledBy.entries()) {
+        if (controller === pcNumber) {
+          controlledBy.delete(controlled);
+          forward(controlled, { type: 'release_mouse', from: pcNumber });
+          console.log(`Auto-release: PC${controlled} liberada por desconexión de PC${pcNumber}`);
+        }
+      }
       clients.delete(pcNumber);
       console.log(`PC${pcNumber} desconectada | Total: ${clients.size}`);
       broadcast({ type: 'peers_update', connectedPcs: [...clients.keys()].sort() });
