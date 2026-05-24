@@ -1,12 +1,10 @@
 const http = require('http');
 const WebSocket = require('ws');
-
 const PORT = process.env.PORT || 8080;
 const clients = new Map();
 
 const server = http.createServer((req, res) => {
-  res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('NXQ KVM Relay OK\n');
+  res.writeHead(200); res.end('NXQ KVM OK\n');
 });
 
 const wss = new WebSocket.Server({ server });
@@ -15,10 +13,8 @@ wss.on('connection', (ws) => {
   let pcNumber = null;
 
   ws.on('message', (raw) => {
-    let msg;
-    try { msg = JSON.parse(raw); } catch { return; }
+    let msg; try { msg = JSON.parse(raw); } catch { return; }
 
-    // ── Registro ──────────────────────────────────────────────────
     if (msg.type === 'register') {
       pcNumber = msg.pcNumber;
       clients.set(pcNumber, ws);
@@ -26,22 +22,17 @@ wss.on('connection', (ws) => {
       ws.send(JSON.stringify({ type: 'registered', pcNumber, connectedPcs: [...clients.keys()].sort() }));
       broadcast({ type: 'peers_update', connectedPcs: [...clients.keys()].sort() });
     }
-
-    // ── Movimiento del mouse en tiempo real ───────────────────────
     else if (msg.type === 'mouse_move') {
-      const target = clients.get(msg.to);
-      if (target && target.readyState === WebSocket.OPEN) {
-        target.send(JSON.stringify({ type: 'set_cursor', xPct: msg.xPct, yPct: msg.yPct }));
-      }
+      forward(msg.to, { type: 'set_cursor', xPct: msg.xPct, yPct: msg.yPct });
     }
-
-    // ── Transferencia de control (legacy) ─────────────────────────
+    else if (msg.type === 'mouse_button') {
+      forward(msg.to, { type: 'mouse_button', btn: msg.btn, wheel: msg.wheel || 0 });
+    }
     else if (msg.type === 'transfer') {
-      const target = clients.get(msg.to);
-      if (target && target.readyState === WebSocket.OPEN) {
-        target.send(JSON.stringify({ type: 'take_mouse', from: pcNumber, yPercent: msg.yPercent, side: msg.side }));
-        console.log(`Mouse: PC${pcNumber} → PC${msg.to}`);
-      }
+      forward(msg.to, { type: 'take_mouse', from: pcNumber, yPercent: msg.yPercent, side: msg.side });
+    }
+    else if (msg.type === 'release_mouse') {
+      forward(msg.to, { type: 'release_mouse', from: pcNumber });
     }
   });
 
@@ -54,11 +45,15 @@ wss.on('connection', (ws) => {
   });
 });
 
+function forward(to, msg) {
+  const target = clients.get(to);
+  if (target?.readyState === WebSocket.OPEN)
+    target.send(JSON.stringify(msg));
+}
+
 function broadcast(msg) {
   const data = JSON.stringify(msg);
   clients.forEach(ws => { if (ws.readyState === WebSocket.OPEN) ws.send(data); });
 }
 
-server.listen(PORT, () => {
-  console.log(`NXQ KVM Relay corriendo en puerto ${PORT}`);
-});
+server.listen(PORT, () => console.log(`NXQ KVM Relay en puerto ${PORT}`));
