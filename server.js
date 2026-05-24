@@ -1,10 +1,11 @@
 const http = require('http');
 const WebSocket = require('ws');
 const PORT = process.env.PORT || 8080;
-const clients = new Map();
 
-// Rastrear quién controla a quién: controlledBy[pc] = controllerPc
-const controlledBy = new Map();
+// rooms: Map<roomCode, Map<pcNumber, ws>>
+const rooms = new Map();
+// controlledBy: Map<roomCode, Map<pcNumber, controllerPcNumber>>
+const controlled = new Map();
 
 const server = http.createServer((req, res) => {
   res.writeHead(200); res.end('NXQ KVM OK\n');
@@ -12,70 +13,82 @@ const server = http.createServer((req, res) => {
 
 const wss = new WebSocket.Server({ server });
 
+function getRoom(code)    { if (!rooms.has(code))    rooms.set(code, new Map());    return rooms.get(code); }
+function getCtrl(code)    { if (!controlled.has(code)) controlled.set(code, new Map()); return controlled.get(code); }
+
+function forward(room, to, msg) {
+  const target = room.get(to);
+  if (target?.readyState === WebSocket.OPEN)
+    target.send(JSON.stringify(msg));
+}
+
+function broadcast(room, msg) {
+  const data = JSON.stringify(msg);
+  room.forEach(ws => { if (ws.readyState === WebSocket.OPEN) ws.send(data); });
+}
+
 wss.on('connection', (ws) => {
   let pcNumber = null;
+  let roomCode = null;
+  let room     = null;
+  let ctrl     = null;
 
   ws.on('message', (raw) => {
     let msg; try { msg = JSON.parse(raw); } catch { return; }
 
     if (msg.type === 'register') {
       pcNumber = msg.pcNumber;
-      clients.set(pcNumber, ws);
-      console.log(`PC${pcNumber} conectada | Total: ${clients.size}`);
-      ws.send(JSON.stringify({ type: 'registered', pcNumber, connectedPcs: [...clients.keys()].sort() }));
-      broadcast({ type: 'peers_update', connectedPcs: [...clients.keys()].sort() });
+      roomCode = (msg.roomCode || 'default').toUpperCase();
+      room     = getRoom(roomCode);
+      ctrl     = getCtrl(roomCode);
+      room.set(pcNumber, ws);
+      console.log(`[${roomCode}] PC${pcNumber} conectada | Sala: ${room.size} PCs`);
+      const pcs = [...room.keys()].sort();
+      ws.send(JSON.stringify({ type: 'registered', pcNumber, connectedPcs: pcs }));
+      broadcast(room, { type: 'peers_update', connectedPcs: pcs });
     }
+
+    if (!room) return;
+
     else if (msg.type === 'mouse_move') {
-      forward(msg.to, { type: 'set_cursor', xPct: msg.xPct, yPct: msg.yPct });
+      forward(room, msg.to, { type: 'set_cursor', xPct: msg.xPct, yPct: msg.yPct });
     }
     else if (msg.type === 'mouse_button') {
-      forward(msg.to, { type: 'mouse_button', btn: msg.btn, wheel: msg.wheel || 0 });
+      forward(room, msg.to, { type: 'mouse_button', btn: msg.btn, wheel: msg.wheel || 0 });
     }
     else if (msg.type === 'transfer') {
-      controlledBy.set(msg.to, pcNumber);
-      forward(msg.to, { type: 'take_mouse', from: pcNumber, yPercent: msg.yPercent, side: msg.side });
+      ctrl.set(msg.to, pcNumber);
+      forward(room, msg.to, { type: 'take_mouse', from: pcNumber, yPercent: msg.yPercent, side: msg.side });
     }
     else if (msg.type === 'release_mouse') {
-      controlledBy.delete(msg.to);
-      forward(msg.to, { type: 'release_mouse', from: pcNumber });
+      ctrl.delete(msg.to);
+      forward(room, msg.to, { type: 'release_mouse', from: pcNumber });
     }
     else if (msg.type === 'steal_mouse') {
-      // PC2 tomó el control — avisar a quien la controlaba
-      const controller = controlledBy.get(pcNumber);
+      const controller = ctrl.get(pcNumber);
       if (controller) {
-        controlledBy.delete(pcNumber);
-        forward(controller, { type: 'steal_mouse', from: pcNumber });
-        console.log(`PC${pcNumber} robó el mouse de PC${controller}`);
+        ctrl.delete(pcNumber);
+        forward(room, controller, { type: 'steal_mouse', from: pcNumber });
+        console.log(`[${roomCode}] PC${pcNumber} robó el mouse de PC${controller}`);
       }
     }
   });
 
   ws.on('close', () => {
-    if (pcNumber) {
-      // Liberar cualquier PC que estuviera siendo controlada por esta
-      for (const [controlled, controller] of controlledBy.entries()) {
-        if (controller === pcNumber) {
-          controlledBy.delete(controlled);
-          forward(controlled, { type: 'release_mouse', from: pcNumber });
-          console.log(`Auto-release: PC${controlled} liberada por desconexión de PC${pcNumber}`);
-        }
+    if (!room || pcNumber === null) return;
+    // Liberar PCs que esta controlaba
+    for (const [victim, controller] of ctrl.entries()) {
+      if (controller === pcNumber) {
+        ctrl.delete(victim);
+        forward(room, victim, { type: 'release_mouse', from: pcNumber });
+        console.log(`[${roomCode}] Auto-release PC${victim} por cierre de PC${pcNumber}`);
       }
-      clients.delete(pcNumber);
-      console.log(`PC${pcNumber} desconectada | Total: ${clients.size}`);
-      broadcast({ type: 'peers_update', connectedPcs: [...clients.keys()].sort() });
     }
+    room.delete(pcNumber);
+    console.log(`[${roomCode}] PC${pcNumber} desconectada | Sala: ${room.size} PCs`);
+    if (room.size === 0) { rooms.delete(roomCode); controlled.delete(roomCode); }
+    else broadcast(room, { type: 'peers_update', connectedPcs: [...room.keys()].sort() });
   });
 });
-
-function forward(to, msg) {
-  const target = clients.get(to);
-  if (target?.readyState === WebSocket.OPEN)
-    target.send(JSON.stringify(msg));
-}
-
-function broadcast(msg) {
-  const data = JSON.stringify(msg);
-  clients.forEach(ws => { if (ws.readyState === WebSocket.OPEN) ws.send(data); });
-}
 
 server.listen(PORT, () => console.log(`NXQ KVM Relay en puerto ${PORT}`));
