@@ -36,6 +36,10 @@ wss.on('connection', (ws) => {
   ws.on('message', (raw) => {
     let msg; try { msg = JSON.parse(raw); } catch { return; }
 
+    if (msg.type === 'ping') {
+      // Mantener servidor despierto — no hacer nada
+      return;
+    }
     if (msg.type === 'register') {
       pcNumber = msg.pcNumber;
       roomCode = (msg.roomCode || 'default').toUpperCase();
